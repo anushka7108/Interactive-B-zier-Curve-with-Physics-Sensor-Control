@@ -1,0 +1,266 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Springy Cubic Bézier (Canvas)</title>
+<style>
+  html, body { height: 100%; margin: 0; background:#0e0f12; color:#e8e8e8; font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
+  #ui {
+  position: fixed;
+  top: 10px;
+  right: 10px;
+  z-index: 9999;     /* <-- keeps panel on top of canvas */
+  background: rgba(255,255,255,0.06);
+  border: 1px solid rgba(255,255,255,0.12);
+  padding: 8px 10px;
+  border-radius: 10px;
+  backdrop-filter: blur(6px);
+}
+
+  canvas { display:block; width:100vw; height:100vh; }
+  label { display:block; font-size:12px; margin-top:4px; }
+  input[type=range] { width: 220px; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="ui">
+  <div><strong>Springy Bézier (mouse drag)</strong></div>
+  <label>k (stiffness): <span id="kval">12</span>
+    <input id="k" type="range" min="1" max="50" step="1" value="12">
+  </label>
+  <label>damping: <span id="dval">10</span>
+    <input id="d" type="range" min="1" max="40" step="1" value="10">
+  </label>
+  <label>tangent step: <span id="tval">0.1</span>
+    <input id="tstep" type="range" min="0.02" max="0.25" step="0.01" value="0.1">
+  </label>
+</div>
+
+<script>
+(() => {
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d');
+  const DPR = Math.max(1, window.devicePixelRatio || 1);
+
+  function resize() {
+    canvas.width = Math.floor(innerWidth * DPR);
+    canvas.height = Math.floor(innerHeight * DPR);
+    canvas.style.width = innerWidth + 'px';
+    canvas.style.height = innerHeight + 'px';
+  }
+  resize(); addEventListener('resize', resize);
+
+  // --------- Utility Vec2 ----------
+  const V = {
+    add: (a,b)=>({x:a.x+b.x,y:a.y+b.y}),
+    sub: (a,b)=>({x:a.x-b.x,y:a.y-b.y}),
+    mul: (a,s)=>({x:a.x*s,y:a.y*s}),
+    len: (a)=>Math.hypot(a.x,a.y),
+    norm: (a)=>{ const L = Math.hypot(a.x,a.y)||1; return {x:a.x/L,y:a.y/L}; }
+  };
+
+  // --------- Curve Control Points ----------
+  // P0, P3 fixed endpoints; P1, P2 dynamic (spring to target)
+  const P0 = { x: () => 0.15 * canvas.width, y: () => 0.5 * canvas.height };
+  const P3 = { x: () => 0.85 * canvas.width, y: () => 0.5 * canvas.height };
+
+  // Dynamic points store current state & target
+  function makeDynamicPoint(x, y) {
+    return {
+      pos: {x, y},
+      vel: {x:0, y:0},
+      target: {x, y}
+    };
+  }
+
+  const P1 = makeDynamicPoint(0.35 * canvas.width, 0.25 * canvas.height);
+  const P2 = makeDynamicPoint(0.65 * canvas.width, 0.75 * canvas.height);
+
+  // --------- Spring-Damper Params ----------
+  const kSlider = document.getElementById('k');
+  const dSlider = document.getElementById('d');
+  const tSlider = document.getElementById('tstep');
+  const kval = document.getElementById('kval');
+  const dval = document.getElementById('dval');
+  const tval = document.getElementById('tval');
+
+  let K = +kSlider.value;       // stiffness
+  let D = +dSlider.value;       // damping
+  let tangentStep = +tSlider.value;
+
+  kSlider.oninput = () => { K = +kSlider.value; kval.textContent = K; };
+  dSlider.oninput = () => { D = +dSlider.value; dval.textContent = D; };
+  tSlider.oninput = () => { tangentStep = +tSlider.value; tval.textContent = tangentStep.toFixed(2); };
+
+  // --------- Input (mouse) ----------
+  let dragging = false;
+  let activePoint = null;
+
+  function nearestDynamicPoint(mx, my) {
+    const r = 30 * DPR;
+    const d1 = Math.hypot(mx - P1.pos.x, my - P1.pos.y);
+    const d2 = Math.hypot(mx - P2.pos.x, my - P2.pos.y);
+    if (Math.min(d1,d2) > r) return null;
+    return d1 < d2 ? P1 : P2;
+  }
+
+  canvas.addEventListener('pointerdown', (e) => {
+    const rect = canvas.getBoundingClientRect();
+    const mx = (e.clientX - rect.left) * DPR;
+    const my = (e.clientY - rect.top) * DPR;
+    activePoint = nearestDynamicPoint(mx, my);
+    dragging = true;
+    if (activePoint) {
+      activePoint.target.x = mx;
+      activePoint.target.y = my;
+    }
+  });
+
+  canvas.addEventListener('pointermove', (e) => {
+    const rect = canvas.getBoundingClientRect();
+    const mx = (e.clientX - rect.left) * DPR;
+    const my = (e.clientY - rect.top) * DPR;
+    if (dragging && activePoint) {
+      activePoint.target.x = mx;
+      activePoint.target.y = my;
+    } else {
+      // hover influence (subtle)
+      P1.target.x = 0.35 * canvas.width + 0.12 * (mx - 0.5 * canvas.width);
+      P1.target.y = 0.35 * canvas.height + 0.12 * (my - 0.5 * canvas.height);
+      P2.target.x = 0.65 * canvas.width + 0.12 * (mx - 0.5 * canvas.width);
+      P2.target.y = 0.65 * canvas.height + 0.12 * (my - 0.5 * canvas.height);
+    }
+  });
+
+  addEventListener('pointerup', () => { dragging = false; activePoint = null; });
+  addEventListener('pointercancel', () => { dragging = false; activePoint = null; });
+
+  // --------- Bézier math (cubic) ----------
+  function BezierPoint(t, p0, p1, p2, p3) {
+    const u = 1 - t;
+    const tt = t * t, uu = u * u;
+    const uuu = uu * u, ttt = tt * t;
+    // B(t) = u^3 P0 + 3 u^2 t P1 + 3 u t^2 P2 + t^3 P3
+    return {
+      x: uuu*p0.x + 3*uu*t*p1.x + 3*u*tt*p2.x + ttt*p3.x,
+      y: uuu*p0.y + 3*uu*t*p1.y + 3*u*tt*p2.y + ttt*p3.y
+    };
+  }
+
+  function BezierTangent(t, p0, p1, p2, p3) {
+    const u = 1 - t;
+    // B'(t) = 3u^2(P1−P0) + 6ut(P2−P1) + 3t^2(P3−P2)
+    const term1 = { x: 3*u*u*(p1.x - p0.x), y: 3*u*u*(p1.y - p0.y) };
+    const term2 = { x: 6*u*t*(p2.x - p1.x), y: 6*u*t*(p2.y - p1.y) };
+    const term3 = { x: 3*t*t*(p3.x - p2.x), y: 3*t*t*(p3.y - p2.y) };
+    return { x: term1.x + term2.x + term3.x, y: term1.y + term2.y + term3.y };
+  }
+
+  // --------- Physics update (semi-implicit Euler) ----------
+  function stepPoint(dp, dt) {
+    // a = -k*(pos - target) - d*vel
+    const ax = -K * (dp.pos.x - dp.target.x) - D * dp.vel.x;
+    const ay = -K * (dp.pos.y - dp.target.y) - D * dp.vel.y;
+    dp.vel.x += ax * dt;
+    dp.vel.y += ay * dt;
+    dp.pos.x += dp.vel.x * dt;
+    dp.pos.y += dp.vel.y * dt;
+  }
+
+  // --------- Render ----------
+  function circle(pt, r) {
+    ctx.beginPath();
+    ctx.arc(pt.x, pt.y, r, 0, Math.PI*2);
+    ctx.fill();
+  }
+
+  function draw() {
+    ctx.clearRect(0,0,canvas.width,canvas.height);
+
+    // background grid (light)
+    ctx.save();
+    ctx.globalAlpha = 0.15;
+    const gs = 40 * DPR;
+    for (let x=0; x<=canvas.width; x+=gs) {
+      ctx.beginPath(); ctx.moveTo(x,0); ctx.lineTo(x,canvas.height); ctx.strokeStyle = '#8aa'; ctx.lineWidth = 1; ctx.stroke();
+    }
+    for (let y=0; y<=canvas.height; y+=gs) {
+      ctx.beginPath(); ctx.moveTo(0,y); ctx.lineTo(canvas.width,y); ctx.strokeStyle = '#8aa'; ctx.lineWidth = 1; ctx.stroke();
+    }
+    ctx.restore();
+
+    const p0 = {x:P0.x(), y:P0.y()};
+    const p3 = {x:P3.x(), y:P3.y()};
+    const p1 = P1.pos, p2 = P2.pos;
+
+    // curve
+    ctx.beginPath();
+    const dt = 0.01;
+    let t = 0;
+    let q = BezierPoint(0, p0, p1, p2, p3);
+    ctx.moveTo(q.x, q.y);
+    for (t = dt; t <= 1 + 1e-6; t += dt) {
+      q = BezierPoint(Math.min(t,1), p0, p1, p2, p3);
+      ctx.lineTo(q.x, q.y);
+    }
+    ctx.lineWidth = 3 * DPR;
+    ctx.strokeStyle = '#7bdff2';
+    ctx.stroke();
+
+    // tangents
+    ctx.lineWidth = 2 * DPR;
+    ctx.strokeStyle = '#f7a072';
+    for (let tt = 0; tt <= 1.0001; tt += tangentStep) {
+      const pp = BezierPoint(tt, p0, p1, p2, p3);
+      const tg = V.norm(BezierTangent(tt, p0, p1, p2, p3));
+      const L = 22 * DPR;
+      ctx.beginPath();
+      ctx.moveTo(pp.x - tg.x*L*0.5, pp.y - tg.y*L*0.5);
+      ctx.lineTo(pp.x + tg.x*L*0.5, pp.y + tg.y*L*0.5);
+      ctx.stroke();
+    }
+
+    // control polygon
+    ctx.lineWidth = 1.5 * DPR;
+    ctx.setLineDash([6*DPR, 6*DPR]);
+    ctx.strokeStyle = '#b4c5e4';
+    ctx.beginPath();
+    ctx.moveTo(p0.x, p0.y);
+    ctx.lineTo(p1.x, p1.y);
+    ctx.lineTo(p2.x, p2.y);
+    ctx.lineTo(p3.x, p3.y);
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    // points
+    ctx.fillStyle = '#e2eafc'; circle(p0, 5*DPR);
+    ctx.fillStyle = '#ffd166'; circle(p1, 6*DPR);
+    ctx.fillStyle = '#ffd166'; circle(p2, 6*DPR);
+    ctx.fillStyle = '#e2eafc'; circle(p3, 5*DPR);
+    ctx.fillStyle = "#ffffff";
+ctx.font = `${14*DPR}px sans-serif`;
+ctx.fillText("P0 (fixed)", p0.x + 10*DPR, p0.y - 10*DPR);
+ctx.fillText("P1 (dynamic)", p1.x + 10*DPR, p1.y - 10*DPR);
+ctx.fillText("P2 (dynamic)", p2.x + 10*DPR, p2.y + 20*DPR);
+ctx.fillText("P3 (fixed)", p3.x + 10*DPR, p3.y + 20*DPR);
+  }
+
+  // --------- Main loop ----------
+  let last = performance.now();
+  function frame(now) {
+    const dt = Math.min(0.03, (now - last) / 1000); // clamp to avoid big jumps
+    last = now;
+
+    stepPoint(P1, dt);
+    stepPoint(P2, dt);
+
+    draw();
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html> 
